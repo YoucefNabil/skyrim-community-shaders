@@ -234,6 +234,10 @@ void Skin::Prepass()
 {
 	auto context = globals::d3d::context;
 
+	if (skinFlow.Available()) {
+		skinFlowShaderWatch.Poll();
+	}
+
 	if (texSkinDetail) {
 		ID3D11ShaderResourceView* srv = texSkinDetail->srv.get();
 		context->PSSetShaderResources(72, 1, &srv);
@@ -574,11 +578,15 @@ void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 	if (settings.EnableSkin) {
 		auto geometry = a_pass->geometry;
 		float4 wetness = GetWetness(geometry);
+		const auto flow = skinFlow.Bind(context, a_pass);
 
-		if (currentWetness != wetness) {
+		if (currentWetness != wetness || currentSkinFlow != flow) {
 			currentWetness = wetness;
+			currentSkinFlow = flow;
 			PerGeometryData perGeometryData{};
 			perGeometryData.skinPerGeometry = wetness;
+			perGeometryData.skinFlowParams = flow.params;
+			perGeometryData.skinFlowLook = flow.look;
 			PerGeometryCB->Update(perGeometryData);
 		}
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "I18n/I18n.h"
+#include "SkinFlowBridge.h"
 
 /** @brief Advanced skin rendering feature with dual specular lobes, detail textures, and wetness effects. */
 struct Skin : Feature
@@ -96,10 +97,15 @@ struct Skin : Feature
 	struct alignas(16) PerGeometryData
 	{
 		float4 skinPerGeometry;
+		float4 skinFlowParams;  // SkinFlowBridge::Bind
+		float4 skinFlowLook;
 	};
 
 	eastl::unique_ptr<ConstantBuffer> PerGeometryCB;
 	float4 currentWetness = { 0.0f, 0.0f, 0.0f, 0.0f };
+	SkinFlowBridge::Params currentSkinFlow{};
+	SkinFlowBridge skinFlow;
+	SkinFlowShaderWatch skinFlowShaderWatch;
 	float playerStamina = 0.0f;
 	float playerStaminaMax = 0.0f;
 

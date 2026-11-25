@@ -1623,6 +1623,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			endif
 	float2 dynamicWet = Skin::GetWetness(input.WorldPosition.z + FrameBuffer::CameraPosAdjust.z, worldNormal.xyz);
 	float skinWetness = Skin::PerlinNoise(wetUV, SharedData::skinData.wetParams.x, SharedData::skinData.wetParams.y, SharedData::skinData.wetParams.z, clamp(dynamicWet.x + dynamicWet.y + SharedData::skinData.skinParams2.y, 0.f, 2.f) * (hasSkinWetness ? 1.0 : 0.5));
+	// SkinFlow sweat, from the normal before the skin detail normal replaces it below.
+	const Skin::SkinFlowWetness skinFlow = Skin::GetSkinFlowWetness(uv, input.WorldPosition.xyz, worldNormal.xyz, dynamicWet.x + dynamicWet.y, SharedData::Timer);
 	if ((SharedData::skinData.skinDetailParams.w > 0.0f || skinWetness > 0.0f) && skinEnabled)
 #		else
 	if (SharedData::skinData.skinDetailParams.w > 0.0f && skinEnabled)
@@ -1663,6 +1665,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		}
 #		endif
 	}
+#		if defined(WETNESS_EFFECTS)
+	// SkinFlow replaces Advanced Skin's own sweat (the Perlin wetness patches) on the skin it covers;
+	// exertion and water still drive it through the SkinFlow amount. Weather wetness stays.
+	if (skinEnabled && skinFlow.active) {
+		skinWetness = skinFlow.gloss;
+		skinWetNormal = normalize(lerp(worldNormal.xyz, skinFlow.normal, skinFlow.cover));
+	}
+#		endif
 #	endif  // CS_SKIN
 
 	float2 baseShadowUV = 1.0.xx;
@@ -3009,6 +3019,19 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float stochasticBlend = (screenNoise * screenNoise) < psout.Diffuse.w ? 1.0 : 0.0;
 	psout.NormalGlossiness.w = stochasticBlend;
 #	endif
+
+#	if defined(SKIN) && defined(CS_SKIN)
+	// SkinFlow debug view replaces the lit result (no lighting, specular or ambient on top).
+	float3 skinFlowDebugColor;
+	if (Skin::GetSkinFlowDebugColor(uv, SharedData::Timer, skinFlowDebugColor)) {
+		psout.Diffuse.xyz = skinFlowDebugColor;
+#		if defined(DEFERRED)
+		psout.Specular.xyz = 0;
+		psout.Albedo.xyz = 0;
+		psout.Reflectance.xyz = 0;
+#		endif
+	}
+#	endif  // CS_SKIN
 
 #	if !defined(HDR_OUTPUT)  // Do not apply gamma correction before we pass to ISHDR.
 	if ((!inWorld && !inReflection) && SharedData::linearLightingSettings.enableLinearLighting && !(Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow)) {
