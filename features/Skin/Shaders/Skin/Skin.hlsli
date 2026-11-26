@@ -35,7 +35,8 @@ namespace Skin
 	Texture2D<float4> TexSkinFlowWater : register(t101);
 
 #	if defined(PSHADER)
-	/// Gravity texture at uv, bilinear over covered texels only (w = covered fraction).
+	/// Gravity texture at uv, bilinear over covered texels only (w = world units per UV unit there,
+	/// 0 = nothing covered).
 	float4 SampleSkinFlow(float2 uv)
 	{
 		uint2 size;
@@ -50,11 +51,11 @@ namespace Skin
 		{
 			const int2 o = int2(k & 1, k >> 1);
 			const float4 t = TexSkinFlow.Load(int3(clamp(i + o, 0, hi), 0));
-			const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y) * t.w;
+			const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y) * (t.w > 0 ? 1.0 : 0.0);
 			sum += t * w;
 			covered += w;
 		}
-		return covered > 0 ? float4(sum.xyz / covered, covered) : 0;
+		return covered > 0 ? sum / covered : 0;
 	}
 
 	float SkinFlowValueNoise(float2 p)
@@ -71,8 +72,8 @@ namespace Skin
 	// Sweat on the skin's wetness layer, built per pixel from the SkinFlow surface (downhill
 	// direction) and the sweat amount: beads (spherical caps that sag downhill on steep skin),
 	// drops that run down steep skin leaving a thin trail, and a thin film between them. The
-	// pattern lives in this surface's UV space scaled to world units, so drops stay put on the
-	// skin while it moves and keep their size from head to body. Drops smaller than a third of a
+	// pattern lives in this surface's UV space mapped to world units by the triangle's own UV-to-world
+	// map, so drops stay put on the skin while it moves and are round and the same size everywhere. Drops smaller than a third of a
 	// pixel fade into the film, so distance does not make them shimmer.
 
 	struct SkinFlowWetness
@@ -110,15 +111,16 @@ namespace Skin
 		return float4(v) * (1.0 / 4294967296.0);
 	}
 
-	/// Where texel id's bead sits: a fixed random spot inside it, in world units on the skin.
-	float2 SkinFlowSpot(int2 id, float cellWorld)
+	/// Where texel id's bead sits: a fixed random spot inside it, in texels.
+	float2 SkinFlowSpot(int2 id)
 	{
-		return (float2(id) + lerp(0.35, 0.65, SkinFlowRandom(id, 1u).xy)) * cellWorld;
+		return float2(id) + lerp(0.35, 0.65, SkinFlowRandom(id, 1u).xy);
 	}
 
 	/// Spherical cap of base radius r and height 0.4 r (a sweat bead's low contact angle), stretched by
 	/// 'stretch' on its downhill side (f = unit downhill direction). d = pixel minus drop centre;
-	/// footprint = world size of a pixel. Keeps the tallest drop at this pixel.
+	/// d and f are in world units on the skin (T, B); footprint = world size of a pixel. Keeps the
+	/// tallest drop at this pixel.
 	void SkinFlowCap(float2 d, float r, float2 f, float stretch, float footprint, inout SkinFlowDrop best)
 	{
 		const float along = dot(d, f);
@@ -169,23 +171,29 @@ namespace Skin
 		const float dropSize = skinFlowLook.x;
 		const float4 g = SampleSkinFlow(saturate(uv));
 		const float slope = saturate(length(g.xy));
-		const float2 f = slope > 1e-3 ? normalize(g.xy) : float2(0, 1);
-
-		// World directions of increasing u and v on the skin (cotangent frame from derivatives).
-		const float3 px = cross(dpy, N);
-		const float3 py = cross(N, dpx);
-		const float side = dot(N, cross(dpx, dpy)) < 0 ? -1.0 : 1.0;
-		float3 tu = (px * duvx.x + py * duvy.x) * side;
-		float3 tv = (px * duvx.y + py * duvy.y) * side;
-		tu *= rsqrt(max(dot(tu, tu), 1e-20));
-		tv *= rsqrt(max(dot(tv, tv), 1e-20));
 
 		uint2 size;
 		TexSkinFlowWater.GetDimensions(size.x, size.y);
 		const int2 hi = int2(size) - 1;
-		const float cellWorld = skinFlowParams.w / float(size.x);  // world units per simulated texel
-		const float2 c = saturate(uv) * float2(size);              // position in texels
-		const float2 q = c * cellWorld;                            // world units on the skin
+
+		// The skin's own metric here: world displacement per unit of u and of v, exact for this
+		// triangle (positions and UVs are both linear across it), in an orthonormal frame (T, B) on
+		// the skin. Drops are drawn in it, so they are round and keep their world size whatever the
+		// UV layout does here: stretched (necks), sheared, or given more texels than elsewhere.
+		const float det = duvx.x * duvy.y - duvy.x * duvx.y;
+		if (abs(det) < 1e-14)
+			return o;
+		const float3 dPdu = (dpx * duvy.y - dpy * duvx.y) / det;
+		const float3 dPdv = (dpy * duvx.x - dpx * duvy.x) / det;
+		const float3 tangent = dPdu - N * dot(dPdu, N);
+		const float3 T = tangent * rsqrt(max(dot(tangent, tangent), 1e-20));
+		const float3 B = cross(N, T);
+		// Texel offsets to world units in (T, B).
+		const float2x2 toWorld = float2x2(dot(dPdu, T), dot(dPdv, T), dot(dPdu, B), dot(dPdv, B)) / float(size.x);
+		const float2 downhill = mul(toWorld, slope > 1e-3 ? g.xy : float2(0, 1));
+		const float2 f = downhill * rsqrt(max(dot(downhill, downhill), 1e-20));
+
+		const float2 c = saturate(uv) * float2(size);  // position in texels
 		const int2 base = int2(floor(c));
 		const float footprint = max(max(length(dpx), length(dpy)), 1e-4);
 
@@ -215,10 +223,11 @@ namespace Skin
 					if (s.w >= 1.0) {
 						// Running: slides from this texel's spot to the next one's as it gets there.
 						const int2 step = kSkinFlowDirections[int(s.w) - 1];
-						const float2 centre = lerp(SkinFlowSpot(id, cellWorld), SkinFlowSpot(id + step, cellWorld), s.z);
-						SkinFlowCap(q - centre, r, normalize(float2(step)), 1.5, footprint, best);
+						const float2 centre = lerp(SkinFlowSpot(id), SkinFlowSpot(id + step), s.z);
+						const float2 path = mul(toWorld, float2(step));
+						SkinFlowCap(mul(toWorld, c - centre), r, path * rsqrt(max(dot(path, path), 1e-20)), 1.5, footprint, best);
 					} else {
-						SkinFlowCap(q - SkinFlowSpot(id, cellWorld), r, f, 1.0 + 0.9 * slope * r / (0.16 * dropSize), footprint, best);
+						SkinFlowCap(mul(toWorld, c - SkinFlowSpot(id)), r, f, 1.0 + 0.9 * slope * r / (0.16 * dropSize), footprint, best);
 					}
 				}
 			}
@@ -227,7 +236,7 @@ namespace Skin
 		trail = smoothstep(0.2, 0.9, trail / max(weights, 1e-4));
 
 		const float2 s = best.slope;
-		o.normal = normalize(N - (s.x * tu + s.y * tv));
+		o.normal = normalize(N - (s.x * T + s.y * B));
 		o.cover = best.cover;
 		o.gloss = max(skinFlowLook.y * max(max(film, trail), saturate(exertion)), best.cover);
 		return o;
@@ -258,7 +267,7 @@ namespace Skin
 		if (skinFlowParams.x <= 0.0 || skinFlowParams.y < 1.0)
 			return false;
 		const float4 g = SampleSkinFlow(saturate(uv));
-		if (g.w <= 0.01) {
+		if (g.w <= 0) {
 			color = float3(1, 0, 1);
 			return true;
 		}
